@@ -80,6 +80,7 @@ class Realsense(Node):
         enable_color: bool = True,
         enable_depth: bool = False,
         bgr: bool = False,
+        hardware_reset: bool = True,
         advanced_mode_config: str | None = None,
         timeout_ms: int = 1000,
         dtype=np.float32,
@@ -96,6 +97,7 @@ class Realsense(Node):
         self.enable_color = enable_color
         self.enable_depth = enable_depth
         self.bgr = bgr
+        self.hardware_reset = hardware_reset
         self.advanced_mode_config = advanced_mode_config
         # pyrealsense2 requires int (float fails pybind11 overload resolution).
         self.timeout_ms = int(timeout_ms)
@@ -137,13 +139,14 @@ class Realsense(Node):
         threadpool_limits(1)
         cv2.setNumThreads(1)
 
-        # Reset only this camera; resetting every RealSense confuses parallel camera startup.
-        ctx = rs.context()
-        for dev in ctx.query_devices():
-            if dev.get_info(rs.camera_info.serial_number) == self.serial:
-                dev.hardware_reset()
-                break
-        time.sleep(self.timeout_ms / 1000.0)
+        if self.hardware_reset:
+            # Reset only this camera; resetting every RealSense confuses parallel camera startup.
+            ctx = rs.context()
+            for dev in ctx.query_devices():
+                if dev.get_info(rs.camera_info.serial_number) == self.serial:
+                    dev.hardware_reset()
+                    break
+            time.sleep(self.timeout_ms / 1000.0)
 
         fps = self.freq
         align = rs.align(rs.stream.color)

@@ -3,6 +3,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 import numpy as np
+from loguru import logger
 
 from .. import time
 from ..interpolators import PoseTrajectoryInterpolator
@@ -16,7 +17,7 @@ except ImportError as e:
     if TYPE_CHECKING:
         raise e
     else:
-        AgGripperDriver = None  # type: ignore
+        AgGripperDriver = None
 
 
 class RobotController(Enum):
@@ -40,12 +41,17 @@ class AgGripper(Node):
         self,
         robot_ip: str = "192.168.0.15",
         tcp_port: int = 54321,
+        robot_port: str | None = None,
+        connection_type: str = "TCPIP",
+        baudrate: int = 115200,
         member_id: int = 1,
         timeout: float = 5.0,
         robot_controller: str = "task_pos",
         max_gripper_speed: float | None = 3.0,
         force: int = 50,
         calibrate: bool = True,
+        startup_position: float | None = 0.0,
+        feedback_freq: float = 10.0,
         dtype=np.float32,
         *,
         freq: int = 30,
@@ -53,19 +59,38 @@ class AgGripper(Node):
         max_queue_size: int = 1,
         **kwargs,
     ):
-        robot_controller = RobotController[robot_controller.upper()]
+        controller = RobotController[robot_controller.upper()]
         if max_buffer_size is None:
             max_buffer_size = int(freq * 10)
         self.robot_ip = robot_ip
         self.tcp_port = tcp_port
+        self.robot_port = robot_port
+        self.connection_type = connection_type.upper()
+        self.baudrate = baudrate
         self.member_id = member_id
         self.timeout = timeout
-        self.robot_controller = robot_controller
+        self.robot_controller = controller
         self.max_gripper_speed = max_gripper_speed
         self.force = force
         self.calibrate = calibrate
+        if startup_position is not None and not 0.0 <= startup_position <= 1.0:
+            raise ValueError(f"startup_position must be in [0, 1] or None, got {startup_position}")
+        if feedback_freq <= 0:
+            raise ValueError(f"feedback_freq must be positive, got {feedback_freq}")
+        self.startup_position = startup_position
+        self.feedback_freq = feedback_freq
         self.dtype = dtype
-        super().__init__(freq=freq, max_buffer_size=max_buffer_size, max_queue_size=max_queue_size, **kwargs)
+        # ThreadClient.__init__ also uses `timeout` (wait for first publish). Keep
+        # the serial I/O timeout on this instance after super() returns.
+        ready_timeout = kwargs.pop("ready_timeout", 30.0)
+        super().__init__(
+            freq=freq,
+            max_buffer_size=max_buffer_size,
+            max_queue_size=max_queue_size,
+            timeout=ready_timeout,
+            **kwargs,
+        )
+        self.timeout = timeout
 
     def __post_init__(self):
         example_request_params = {
@@ -94,9 +119,28 @@ class AgGripper(Node):
         return super().__post_init__()
 
     def pubreq(self):
-        gripper = AgGripperDriver(self.robot_ip, self.tcp_port, self.member_id, self.timeout)
+        gripper = AgGripperDriver(
+            self.robot_ip,
+            self.tcp_port,
+            self.member_id,
+            self.timeout,
+            self.freq,
+            connection_type=self.connection_type,
+            robot_port=self.robot_port,
+            baudrate=self.baudrate,
+        )
         gripper.connect()
-        gripper.setup(force=self.force, do_calibration=self.calibrate)
+        startup_position = None if self.startup_position is None else round(self.startup_position * 1000)
+        gripper.setup(
+            force=self.force,
+            do_calibration=self.calibrate,
+            startup_position=startup_position,
+        )
+        logger.info(
+            "AG gripper ready (calibrate={}, position={:.3f})",
+            self.calibrate,
+            gripper.state / 1000.0,
+        )
 
         try:
             if self.robot_controller == RobotController.TASK_POS:
@@ -112,6 +156,8 @@ class AgGripper(Node):
                     pose_interp = None
             else:
                 raise ValueError(self.robot_controller)
+            last_feedback_time = time.now()
+            feedback_failures = 0
 
             # Main loop
             dt = 1.0 / self.freq
@@ -127,15 +173,25 @@ class AgGripper(Node):
                         # Convert normalized (0-1) to per-mille (0-1000)
                         target_permil = int(np.clip(target_pos, 0.0, 1.0) * 1000)
                     else:
-                        raise NotImplementedError
+                        target_permil = int(np.clip(target_pos, 0.0, 1.0) * 1000)
                     gripper.set_position(target_permil)
                 else:
                     raise ValueError(self.robot_controller)
 
                 # get state from robot
-                robot_state = {
-                    "gripper_position": gripper.state / 1000.0,  # Normalize to 0-1
-                }
+                if self.connection_type == "SERIAL" and t_now - last_feedback_time >= 1.0 / self.feedback_freq:
+                    try:
+                        gripper.read_position()
+                    except RuntimeError as error:
+                        feedback_failures += 1
+                        if feedback_failures >= 10:
+                            raise
+                        if feedback_failures == 1:
+                            logger.warning("AG gripper missed a feedback response: {}", error)
+                    else:
+                        feedback_failures = 0
+                    last_feedback_time = t_now
+                robot_state = {"gripper_position": gripper.state / 1000.0}
 
                 # Store current state in ring buffer
                 data = {
@@ -170,6 +226,8 @@ class AgGripper(Node):
                                 last_waypoint_time=last_waypoint_time,
                             )
                             last_waypoint_time = target_time
+                        else:
+                            target_pos = np.clip(target_pos, 0.0, 1.0)
                     else:
                         raise ValueError(req.type)
                 rate.precise_sleep()

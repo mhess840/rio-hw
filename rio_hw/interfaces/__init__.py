@@ -1,4 +1,5 @@
 from .avp_stream import AvpStreamClient, AvpStreamServer
+from .clicker import ClickerClient, ClickerServer
 from .gamepad import GamepadClient, GamepadServer
 from .gello import GelloClient, GelloServer
 from .joycon import JoyconClient, JoyconServer
@@ -13,6 +14,7 @@ from .x_robotoolkit import XRobotoolkitClient, XRobotoolkitServer
 
 __all__ = [
     "AvpStream",
+    "Clicker",
     "Gamepad",
     "Gello",
     "Joycon",
