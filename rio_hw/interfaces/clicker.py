@@ -1,8 +1,9 @@
-"""Read a spare mouse as gripper buttons, without moving the desktop cursor.
+"""Read a spare mouse as gripper and scale buttons, without moving the desktop cursor.
 
 The node opens one evdev mouse (default: Logitech Unifying Receiver), exclusive-
 grabs it so motion never reaches X11/Wayland, and publishes the same keyboard-
-shaped state as `Keyboard`: left click = close, right click = open.
+shaped state as `Keyboard`: left click = close, right click = open, side/back =
+finer motion scale, extra/forward = coarser motion scale.
 """
 
 from pathlib import Path
@@ -28,9 +29,20 @@ except ImportError as e:
 # USB HID usage codes matching rio.envs.poll / SshKeyboard presenter mapping.
 BTN_LEFT = 0x110
 BTN_RIGHT = 0x111
+BTN_SIDE = 0x113
+BTN_EXTRA = 0x114
+BTN_FORWARD = 0x115
+BTN_BACK = 0x116
+# Consumer-page AC Back / AC Forward, distinct from the presenter PageUp/Down map.
+HID_SCALE_DOWN = 0x224
+HID_SCALE_UP = 0x225
 _EVDEV_TO_HID = {
     BTN_LEFT: 0x4E,  # PageDown → close
     BTN_RIGHT: 0x4B,  # PageUp → open
+    BTN_SIDE: HID_SCALE_DOWN,
+    BTN_BACK: HID_SCALE_DOWN,
+    BTN_EXTRA: HID_SCALE_UP,
+    BTN_FORWARD: HID_SCALE_UP,
 }
 
 DEFAULT_DEVICE_PATH = "/dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-mouse"

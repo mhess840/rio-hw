@@ -118,6 +118,7 @@ class RequestType(Enum):
     MOVEL = auto()
     MOVEJ = auto()
     SPEEDJ = auto()
+    MOVEJ_DISCRETE = auto()
 
 
 # Joint tracking deadband for task_pos_ik (rad); below this, send zero qd.
@@ -156,6 +157,7 @@ class KassowArm(Node):
         "moveL",
         "moveJ",
         "speedJ",
+        "moveJ_discrete",
     ]
     __pub__ = True
     __req__ = True
@@ -708,6 +710,35 @@ class KassowArm(Node):
                         self._send_vel_cmd(qd)
                         self._vel_mode_active = True
 
+                    elif req.type == RequestType.MOVEJ_DISCRETE:
+                        # One-shot ctl_->moveJ (TT_TIME, OT_STOPPOINT). Stop VelCmd
+                        # first — mixing streamed Vel/streamJ with this is what
+                        # trips JTORQUE. Idle zeros stay off until the next teleop
+                        # moveL re-enters Vel from the measured pose.
+                        if state.alarm_code:
+                            logger.warning(
+                                "KassowArm: skip discrete moveJ, alarm "
+                                f"{describe_alarm(state.alarm_code)}"
+                            )
+                            continue
+                        self._vel_mode_active = False
+                        self._qd_filter = None
+                        self._last_qd = None
+                        self._last_qd_t = None
+                        target = np.array(req.params["target_joint_q"], dtype=self.dtype)
+                        if self.joint_limits is not None:
+                            target = np.clip(target, *self.joint_limits)
+                        duration = max(float(req.params["duration_s"]), 0.2)
+                        cmd = _kord_bridge.MoveJCmd()
+                        cmd.q = target.tolist()
+                        cmd.tt_val = duration
+                        cmd.bt_val = 0.0
+                        self._bridge.queue_move_j(cmd)
+                        logger.info(
+                            f"KassowArm: discrete moveJ duration={duration:.2f}s "
+                            f"q={np.round(target, 3).tolist()}"
+                        )
+
                     else:
                         raise ValueError(req.type)
                 rate.precise_sleep()
@@ -841,6 +872,25 @@ class KassowArm(Node):
             "type": RequestType.SPEEDJ.value,
             "target_joint_qd": target_joint_qd,
             "target_time": target_time,
+        }
+        self.request_queue.put(req)
+
+    def moveJ_discrete(self, target_joint_q, duration_s: float):
+        """One-shot KORD ``moveJ`` (time tracking, stop at target).
+
+        Stops the Cartesian VelCmd stream first. Do not call ``moveL`` /
+        streamed ``moveJ`` / ``speedJ`` until the motion has finished.
+
+        Args:
+            target_joint_q: Absolute 7-vector in radians.
+            duration_s: Tracking time in seconds. Larger is slower.
+        """
+        target_joint_q = np.array(target_joint_q, dtype=self.dtype)
+        assert target_joint_q.shape == (self.num_joints,)
+        req = {
+            "type": RequestType.MOVEJ_DISCRETE.value,
+            "target_joint_q": target_joint_q,
+            "duration_s": float(duration_s),
         }
         self.request_queue.put(req)
 

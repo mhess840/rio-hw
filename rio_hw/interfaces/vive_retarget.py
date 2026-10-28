@@ -260,6 +260,20 @@ class ClutchRetargeter:
     def disengage(self) -> None:
         self.engaged = False
 
+    def rebase(self, tracker_pose: np.ndarray) -> None:
+        """Reset the clutch origin to the current tracker and commanded TCP.
+
+        Call this after changing ``pos_scale`` or ``rot_scale`` while engaged so
+        the TCP does not jump; later tracker motion is scaled from here.
+        """
+        if not self.engaged:
+            return
+        tracker_pose = np.asarray(tracker_pose, dtype=float)
+        self._tracker_pos_0 = tracker_pose[:3, 3].copy()
+        self._tracker_rot_0 = orthonormalize(tracker_pose[:3, :3])
+        self._tcp_pos_0 = self._last_pos.copy()
+        self._tcp_rot_0 = self._last_rot.copy()
+
     def target(self, tracker_pose: np.ndarray, dt: float) -> tuple[np.ndarray, np.ndarray]:
         """Return the (position, 3x3 rotation) TCP target for the current tracker pose."""
         if not self.engaged:

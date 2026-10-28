@@ -92,6 +92,41 @@ def test_engage_produces_no_jump():
     np.testing.assert_allclose(rotation, tcp_rot, atol=1e-9)
 
 
+def test_rebase_after_scale_change_does_not_jump():
+    """Changing scale mid-clutch must not move the commanded TCP."""
+    retargeter = ClutchRetargeter(pos_scale=1.0, rot_scale=1.0, max_pos_speed=10.0, max_rot_speed=10.0)
+    tcp = np.array([0.4, 0.0, 0.3])
+    origin = tracker_pose([0.0, 1.0, 0.0])
+    retargeter.engage(origin, tcp, np.eye(3))
+    moved = tracker_pose([0.1, 1.05, 0.0])
+    before, before_rot = retargeter.target(moved, dt=1.0)
+
+    retargeter.pos_scale = 0.25
+    retargeter.rot_scale = 0.25
+    retargeter.rebase(moved)
+    after, after_rot = retargeter.target(moved, dt=1.0)
+
+    np.testing.assert_allclose(after, before, atol=1e-9)
+    np.testing.assert_allclose(after_rot, before_rot, atol=1e-9)
+
+
+def test_rebase_applies_new_scale_to_later_motion():
+    retargeter = ClutchRetargeter(pos_scale=1.0, max_pos_speed=10.0)
+    tcp = np.array([0.4, 0.0, 0.3])
+    origin = tracker_pose([0.0, 1.0, 0.0])
+    retargeter.engage(origin, tcp, np.eye(3))
+    mid = tracker_pose([0.1, 1.0, 0.0])
+    at_mid, _ = retargeter.target(mid, dt=1.0)
+
+    retargeter.pos_scale = 0.5
+    retargeter.rebase(mid)
+    further = tracker_pose([0.2, 1.0, 0.0])
+    after, _ = retargeter.target(further, dt=1.0)
+
+    extra = AXIS_MAP_STEAMVR_TO_ROBOT @ np.array([0.1, 0.0, 0.0])
+    np.testing.assert_allclose(after, at_mid + 0.5 * extra, atol=1e-9)
+
+
 def test_tracker_translation_maps_through_axis_map():
     """Tracker motion is expressed in the robot frame via the axis map."""
     retargeter = ClutchRetargeter(max_pos_speed=10.0)

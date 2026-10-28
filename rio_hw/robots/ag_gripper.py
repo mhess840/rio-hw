@@ -248,7 +248,9 @@ class AgGripper(Node):
     def moveG(self, target_pos, target_time):
         target_pos = np.array(target_pos, dtype=self.dtype)
         assert target_pos.shape == (1,)
-        assert target_time > time.now()
+        now = time.now()
+        if target_time <= now:
+            target_time = now + 1.0 / max(int(self.freq), 1)
         req = {
             "type": RequestType.MOVEG.value,
             "target_pos": target_pos,
