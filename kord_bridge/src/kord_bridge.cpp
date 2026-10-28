@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <pthread.h>
+#include <stdexcept>
 
 using namespace kr2::kord;
 using EJV = ReceiverInterface::EJointValue;
@@ -15,45 +16,46 @@ struct Quat {
     double w{1.0}, x{0.0}, y{0.0}, z{0.0};
 };
 
-Quat rotvec_to_quat(double rx, double ry, double rz)
+Quat euler_xyz_to_quat(double roll, double pitch, double yaw)
 {
-    const double angle = std::sqrt(rx * rx + ry * ry + rz * rz);
-    if (angle < 1e-12) {
-        return {};
-    }
-    const double half = 0.5 * angle;
-    const double s = std::sin(half) / angle;
-    return {std::cos(half), rx * s, ry * s, rz * s};
+    const double cos_roll = std::cos(roll * 0.5);
+    const double sin_roll = std::sin(roll * 0.5);
+    const double cos_pitch = std::cos(pitch * 0.5);
+    const double sin_pitch = std::sin(pitch * 0.5);
+    const double cos_yaw = std::cos(yaw * 0.5);
+    const double sin_yaw = std::sin(yaw * 0.5);
+    return {
+        cos_roll * cos_pitch * cos_yaw + sin_roll * sin_pitch * sin_yaw,
+        sin_roll * cos_pitch * cos_yaw - cos_roll * sin_pitch * sin_yaw,
+        cos_roll * sin_pitch * cos_yaw + sin_roll * cos_pitch * sin_yaw,
+        cos_roll * cos_pitch * sin_yaw - sin_roll * sin_pitch * cos_yaw,
+    };
 }
 
-void quat_to_rotvec(const Quat& q, double& rx, double& ry, double& rz)
+void quat_to_euler_xyz(const Quat& quaternion, double& roll, double& pitch, double& yaw)
 {
-    Quat n = q;
-    const double nrm = std::sqrt(n.w * n.w + n.x * n.x + n.y * n.y + n.z * n.z);
-    if (nrm < 1e-12) {
-        rx = ry = rz = 0.0;
+    const double norm = std::sqrt(
+        quaternion.w * quaternion.w + quaternion.x * quaternion.x
+        + quaternion.y * quaternion.y + quaternion.z * quaternion.z);
+    if (norm < 1e-12) {
+        roll = pitch = yaw = 0.0;
         return;
     }
-    n.w /= nrm;
-    n.x /= nrm;
-    n.y /= nrm;
-    n.z /= nrm;
-    if (n.w < 0.0) {
-        n.w = -n.w;
-        n.x = -n.x;
-        n.y = -n.y;
-        n.z = -n.z;
-    }
-    const double sin_half = std::sqrt(std::max(0.0, 1.0 - n.w * n.w));
-    if (sin_half < 1e-12) {
-        rx = ry = rz = 0.0;
+    const Quat normalized{quaternion.w / norm, quaternion.x / norm, quaternion.y / norm, quaternion.z / norm};
+    const double sin_pitch = std::clamp(2.0 * (normalized.w * normalized.y - normalized.z * normalized.x), -1.0, 1.0);
+    if (std::abs(sin_pitch) >= 1.0 - 1e-12) {
+        roll = std::atan2(2.0 * normalized.x * normalized.w, normalized.w * normalized.w - normalized.x * normalized.x);
+        pitch = std::copysign(0.5 * std::acos(-1.0), sin_pitch);
+        yaw = 0.0;
         return;
     }
-    const double angle = 2.0 * std::atan2(sin_half, n.w);
-    const double s = angle / sin_half;
-    rx = n.x * s;
-    ry = n.y * s;
-    rz = n.z * s;
+    roll = std::atan2(
+        2.0 * (normalized.w * normalized.x + normalized.y * normalized.z),
+        1.0 - 2.0 * (normalized.x * normalized.x + normalized.y * normalized.y));
+    pitch = std::asin(sin_pitch);
+    yaw = std::atan2(
+        2.0 * (normalized.w * normalized.z + normalized.x * normalized.y),
+        1.0 - 2.0 * (normalized.y * normalized.y + normalized.z * normalized.z));
 }
 
 Quat slerp(Quat a, Quat b, double t)
@@ -95,8 +97,8 @@ Quat slerp(Quat a, Quat b, double t)
 
 double rot_angle(const std::array<double, 6>& a, const std::array<double, 6>& b)
 {
-    const Quat qa = rotvec_to_quat(a[3], a[4], a[5]);
-    const Quat qb = rotvec_to_quat(b[3], b[4], b[5]);
+    const Quat qa = euler_xyz_to_quat(a[3], a[4], a[5]);
+    const Quat qb = euler_xyz_to_quat(b[3], b[4], b[5]);
     double dot = std::abs(qa.w * qb.w + qa.x * qb.x + qa.y * qb.y + qa.z * qb.z);
     dot = std::clamp(dot, 0.0, 1.0);
     return 2.0 * std::acos(dot);
@@ -139,10 +141,10 @@ bool advance_pose(std::array<double, 6>& curr, const std::array<double, 6>& goal
         next[i] = curr[i] + alpha * (goal[i] - curr[i]);
     }
     const Quat q = slerp(
-        rotvec_to_quat(curr[3], curr[4], curr[5]),
-        rotvec_to_quat(goal[3], goal[4], goal[5]),
+        euler_xyz_to_quat(curr[3], curr[4], curr[5]),
+        euler_xyz_to_quat(goal[3], goal[4], goal[5]),
         alpha);
-    quat_to_rotvec(q, next[3], next[4], next[5]);
+    quat_to_euler_xyz(q, next[3], next[4], next[5]);
     curr = next;
     return true;
 }
@@ -188,9 +190,26 @@ KordBridge::State KordBridge::get_state() const
     return current_state_;
 }
 
+void KordBridge::cancel_motion()
+{
+    std::lock_guard<std::mutex> lock(cmd_mtx_);
+    active_cmd_type_ = CmdType::None;
+    stream_j_dirty_ = false;
+    stream_l_dirty_ = false;
+}
+
+void KordBridge::set_command_timeout(double seconds)
+{
+    if (!std::isfinite(seconds) || seconds <= 0.0) {
+        throw std::invalid_argument("Command timeout must be finite and positive");
+    }
+    command_timeout_s_.store(seconds, std::memory_order_relaxed);
+}
+
 void KordBridge::set_djc_command(const DJCCmd& cmd)
 {
     std::lock_guard<std::mutex> lock(cmd_mtx_);
+    last_stream_command_ = std::chrono::steady_clock::now();
     pending_djc_     = cmd;
     active_cmd_type_ = CmdType::DJC;
 }
@@ -198,6 +217,7 @@ void KordBridge::set_djc_command(const DJCCmd& cmd)
 void KordBridge::set_vel_command(const VelCmd& cmd)
 {
     std::lock_guard<std::mutex> lock(cmd_mtx_);
+    last_stream_command_ = std::chrono::steady_clock::now();
     pending_vel_     = cmd;
     active_cmd_type_ = CmdType::Vel;
 }
@@ -205,6 +225,7 @@ void KordBridge::set_vel_command(const VelCmd& cmd)
 void KordBridge::set_stream_j_command(const StreamJCmd& cmd)
 {
     std::lock_guard<std::mutex> lock(cmd_mtx_);
+    last_stream_command_ = std::chrono::steady_clock::now();
     pending_stream_j_ = cmd;
     active_cmd_type_  = CmdType::StreamJ;
     stream_j_dirty_   = true;
@@ -218,6 +239,7 @@ void KordBridge::set_stream_j_throttle(int n)
 void KordBridge::set_stream_l_command(const StreamLCmd& cmd)
 {
     std::lock_guard<std::mutex> lock(cmd_mtx_);
+    last_stream_command_ = std::chrono::steady_clock::now();
     pending_stream_l_ = cmd;
     active_cmd_type_  = CmdType::StreamL;
     stream_l_dirty_   = true;
@@ -295,6 +317,7 @@ void KordBridge::rt_loop()
     std::array<double, kNumJoints> prev_sensor_q{};
     std::array<double, 6> prev_tcp{};
     bool tcp_valid = false;
+    bool alarm_active = false;
     bool stream_l_want = false;
     uint64_t stream_j_sends_local = 0;
     uint64_t stream_l_sends_local = 0;
@@ -318,6 +341,7 @@ void KordBridge::rt_loop()
                 ++current_state_.tick;
                 current_state_.alarm_code = rcv_->systemAlarmState();
                 current_state_.alarm = (current_state_.alarm_code != 0);
+                alarm_active = current_state_.alarm;
             }
             continue;
         }
@@ -334,6 +358,15 @@ void KordBridge::rt_loop()
         MoveLCmd   ml;
         {
             std::lock_guard<std::mutex> lock(cmd_mtx_);
+            const bool streaming = active_cmd_type_ == CmdType::Vel || active_cmd_type_ == CmdType::DJC
+                || active_cmd_type_ == CmdType::StreamJ || active_cmd_type_ == CmdType::StreamL;
+            const double command_age = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - last_stream_command_).count();
+            if (alarm_active || (streaming && command_age > command_timeout_s_.load(std::memory_order_relaxed))) {
+                active_cmd_type_ = CmdType::None;
+                stream_j_dirty_ = false;
+                stream_l_dirty_ = false;
+            }
             cmd_type = active_cmd_type_;
             djc      = pending_djc_;
             vel      = pending_vel_;
@@ -481,7 +514,13 @@ void KordBridge::rt_loop()
             break;
 
         default:
+            if (!alarm_active && (prev_cmd_type == CmdType::Vel || prev_cmd_type == CmdType::DJC)) {
+                ctl_->directJControl(prev_sensor_q, kZeros, kZeros);
+            }
+            vel_q_ref_ = prev_sensor_q;
             stream_l_active_ = false;
+            stream_l_have_curr_ = false;
+            stream_l_want = false;
             break;
         }
 
@@ -510,10 +549,14 @@ void KordBridge::rt_loop()
 
         // Alarm: drop the open segment and re-anchor on the next goal from TCP.
         if (alarm_code != 0) {
+            cancel_motion();
+            prev_cmd_type = CmdType::None;
+            vel_q_ref_ = prev_sensor_q;
             stream_l_active_ = false;
             stream_l_have_curr_ = false;
             stream_l_want = false;
         }
+        alarm_active = alarm_code != 0;
     }
 }
 

@@ -236,11 +236,11 @@ class AgGripperDriver:
         try:
             self._require_transport().write(bytes(frame))
         except BlockingIOError:
-            pass  # Buffer full, skip this write
+            return False
 
         # Drain buffer at calculated frequency
         self._drain_buffer()
-        return None
+        return True
 
     def _read_register_blocking(self, reg_addr: int) -> int:
         frame = bytearray([self.member_id, 0x03])
@@ -270,18 +270,21 @@ class AgGripperDriver:
         pct = max(20, min(100, percent))
         self._write_register_blocking(0x0101, pct)
 
+    @property
+    def commanded_position(self) -> int:
+        """Return the last written target, or initial measured opening before a target is known."""
+        return self.state if self._last_position_sent is None else self._last_position_sent
+
     def set_position(self, permil: int):
         """Set target position: 0-1000‰ (0=closed, 1000=open)."""
         pos = max(0, min(1000, permil))
 
         # Skip if position hasn't changed
         if pos == self._last_position_sent:
-            self.state = pos
             return
 
-        self.state = pos
-        self._last_position_sent = pos
-        self._write_register_fast(0x0103, pos)
+        if self._write_register_fast(0x0103, pos) is not False:
+            self._last_position_sent = pos
 
     def read_position(self) -> int:
         """Read and cache the measured opening in per-mille."""

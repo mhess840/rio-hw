@@ -39,6 +39,10 @@ class Rate:
 
     def precise_sleep(self):
         end_time = self.start_time + self.period
+        current_time = now()
+        if end_time <= current_time:
+            self.start_time = current_time
+            return
         precise_wait(end_time)
         self.start_time = end_time
 

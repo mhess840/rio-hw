@@ -201,6 +201,76 @@ class PoseTrajectoryInterpolator:
         return pose
 
 
+class ActionInterpolator:
+    """Interpolate action waypoints, optionally treating slots 3:6 as an SO(3) rotation."""
+
+    def __init__(self, multiplier: int = 1, *, rotvec: bool = False, discrete_indices: tuple[int, ...] = ()):
+        if not isinstance(multiplier, (int, np.integer)) or multiplier < 1:
+            raise ValueError("multiplier must be a positive integer")
+        self.multiplier = int(multiplier)
+        self.rotvec = rotvec
+        self.discrete_indices = discrete_indices
+        self._previous: np.ndarray | None = None
+        self._buffer: list[np.ndarray] = []
+        self._index = 0
+
+    @property
+    def has_previous(self) -> bool:
+        """Whether an initial or previously interpolated waypoint is available."""
+        return self._previous is not None
+
+    def _as_action(self, action) -> np.ndarray:
+        if hasattr(action, "detach"):
+            action = action.detach().cpu().numpy()
+        values = np.asarray(action, dtype=np.float32)
+        if values.ndim != 1 or not values.size or not np.isfinite(values).all():
+            raise ValueError("An action must be a non-empty, finite vector")
+        if self.rotvec and values.size < 6:
+            raise ValueError("A Cartesian action must contain xyz and a rotation vector")
+        return values.copy()
+
+    def reset(self, previous=None) -> None:
+        """Discard buffered actions and optionally seed interpolation from a live command."""
+        self._previous = None if previous is None else self._as_action(previous)
+        self._buffer = []
+        self._index = 0
+
+    def needs_new_action(self) -> bool:
+        """Return whether the current interpolation has been consumed."""
+        return self._index >= len(self._buffer)
+
+    def add(self, action) -> None:
+        """Add a waypoint, using SLERP for Cartesian orientation and linear interpolation otherwise."""
+        target = self._as_action(action)
+        if any(index < -len(target) or index >= len(target) for index in self.discrete_indices):
+            raise ValueError("Discrete action index is outside the action vector")
+        previous = self._previous
+        if previous is not None and previous.shape != target.shape:
+            raise ValueError(f"Action shape changed from {previous.shape} to {target.shape}")
+        if previous is None or self.multiplier == 1:
+            buffer = target[None, :]
+        else:
+            fractions = np.linspace(0.0, 1.0, self.multiplier + 1)[1:]
+            buffer = previous + fractions[:, None] * (target - previous)
+            if self.rotvec:
+                poses = PoseTrajectoryInterpolator([0.0, 1.0], np.stack([previous[:6], target[:6]]))
+                buffer[:, :6] = poses(fractions)
+        indices = list(self.discrete_indices)
+        if indices:
+            buffer[:, indices] = target[indices]
+        self._buffer = [np.asarray(values, dtype=np.float32).copy() for values in buffer]
+        self._previous = target
+        self._index = 0
+
+    def get(self) -> np.ndarray | None:
+        """Return the next interpolated command without exposing mutable internal storage."""
+        if self.needs_new_action():
+            return None
+        action = self._buffer[self._index].copy()
+        self._index += 1
+        return action
+
+
 class TrajectoryInterpolator:
     def __init__(self, times: list | np.ndarray, values: list | np.ndarray):
         """Initialize the motor trajectory interpolator.

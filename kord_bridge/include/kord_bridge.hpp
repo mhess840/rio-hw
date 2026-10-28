@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -112,6 +113,8 @@ public:
     bool is_running() const { return running_.load(std::memory_order_relaxed); }
 
     State get_state() const;
+    void  cancel_motion();
+    void  set_command_timeout(double seconds);
     void  set_djc_command(const DJCCmd& cmd);
     void  set_vel_command(const VelCmd& cmd);
     void  set_stream_j_command(const StreamJCmd& cmd);
@@ -152,6 +155,8 @@ private:
 
     std::mutex cmd_mtx_;
     CmdType    active_cmd_type_{CmdType::None};
+    std::chrono::steady_clock::time_point last_stream_command_{};
+    std::atomic<double> command_timeout_s_{0.1};
     DJCCmd     pending_djc_{};
     VelCmd     pending_vel_{};
     StreamJCmd pending_stream_j_{};

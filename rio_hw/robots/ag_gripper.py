@@ -104,6 +104,7 @@ class AgGripper(Node):
 
         example_robot_state = {
             "gripper_position": 0.0,
+            "gripper_commanded_position": 0.0,
         }
 
         self.example_request = {
@@ -158,6 +159,7 @@ class AgGripper(Node):
                 raise ValueError(self.robot_controller)
             last_feedback_time = time.now()
             feedback_failures = 0
+            have_target = startup_position is not None
 
             # Main loop
             dt = 1.0 / self.freq
@@ -167,7 +169,7 @@ class AgGripper(Node):
             while not self.exit_event.is_set():
                 t_now = time.now()
                 # send command to robot
-                if self.robot_controller == RobotController.TASK_POS:
+                if self.robot_controller == RobotController.TASK_POS and have_target:
                     if pose_interp is not None:
                         target_pos = pose_interp(t_now)[0]
                         # Convert normalized (0-1) to per-mille (0-1000)
@@ -175,7 +177,7 @@ class AgGripper(Node):
                     else:
                         target_permil = int(np.clip(target_pos, 0.0, 1.0) * 1000)
                     gripper.set_position(target_permil)
-                else:
+                elif self.robot_controller != RobotController.TASK_POS:
                     raise ValueError(self.robot_controller)
 
                 # get state from robot
@@ -191,7 +193,10 @@ class AgGripper(Node):
                     else:
                         feedback_failures = 0
                     last_feedback_time = t_now
-                robot_state = {"gripper_position": gripper.state / 1000.0}
+                robot_state = {
+                    "gripper_position": gripper.state / 1000.0,
+                    "gripper_commanded_position": gripper.commanded_position / 1000.0,
+                }
 
                 # Store current state in ring buffer
                 data = {
@@ -213,6 +218,12 @@ class AgGripper(Node):
                 for r in reqs:
                     req = Request(RequestType(r.pop("type")), r)
                     if req.type == RequestType.MOVEG:
+                        if not have_target and pose_interp is not None:
+                            pose_interp = PoseTrajectoryInterpolator(
+                                times=[t_now], poses=[[gripper.state / 1000.0, 0, 0, 0, 0, 0]]
+                            )
+                            last_waypoint_time = t_now
+                        have_target = True
                         target_pos = np.array(req.params["target_pos"], dtype=self.dtype)[0]
                         target_time = float(req.params["target_time"])
                         if pose_interp is not None:

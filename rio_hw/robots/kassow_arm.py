@@ -119,6 +119,7 @@ class RequestType(Enum):
     MOVEJ = auto()
     SPEEDJ = auto()
     MOVEJ_DISCRETE = auto()
+    STOP_MOTION = auto()
 
 
 # Joint tracking deadband for task_pos_ik (rad); below this, send zero qd.
@@ -158,6 +159,7 @@ class KassowArm(Node):
         "moveJ",
         "speedJ",
         "moveJ_discrete",
+        "stop_motion",
     ]
     __pub__ = True
     __req__ = True
@@ -193,6 +195,7 @@ class KassowArm(Node):
         ee_frame: str = DEFAULT_EE_FRAME,
         ik_kp: float = 8.0,
         log_diagnostics: bool = False,
+        clear_alarms_on_start: bool = False,
         dtype=np.float64,
         *,
         freq: int = 250,
@@ -315,6 +318,7 @@ class KassowArm(Node):
             assert q_bounds.shape == (2, NUM_JOINTS)
             self.joint_limits = (q_bounds[0], q_bounds[1])
         self.log_diagnostics = log_diagnostics
+        self.clear_alarms_on_start = bool(clear_alarms_on_start)
         self.dtype = dtype
 
         # The guards below are all derived from the speed ceilings so that a
@@ -375,6 +379,9 @@ class KassowArm(Node):
         example_request_params["target_time"] = time.now()
 
         self._bridge = _kord_bridge.KordBridge(self.robot_ip, self.port, self.session_id, self.rt_priority)
+        if not all(hasattr(self._bridge, name) for name in ("cancel_motion", "set_command_timeout")):
+            raise ImportError(f"The installed _kord_bridge lacks the motion watchdog API. {BUILD_HINT}")
+        self._bridge.set_command_timeout(max(0.1, 3.0 / self.cmd_freq))
         if not self._bridge.connect():
             raise RuntimeError(f"KassowArm: failed to connect to {self.robot_ip}:{self.port}")
         self._bridge.set_stream_l_throttle(self.stream_l_throttle)
@@ -382,7 +389,7 @@ class KassowArm(Node):
         # After SafetyEvent ESTOP (e.g. JREF_X_SENSOR_POSITION_SPAN) a CBun-only
         # clear is not enough — CLEAR_HALT must run too. kord-clean-alarm keeps
         # only the last dedicated flag unless --all is passed.
-        if self._bridge.clear_recoverable_alarms():
+        if self.clear_alarms_on_start and self._bridge.clear_recoverable_alarms():
             logger.info("KassowArm: cleared recoverable halt/CBun/unsuspend latches")
 
         if self.robot_controller == RobotController.TASK_POS_IK:
@@ -412,6 +419,7 @@ class KassowArm(Node):
             "joint_qd": np.zeros((NUM_JOINTS,), dtype=self.dtype),
             "joint_tau": np.zeros((NUM_JOINTS,), dtype=self.dtype),
             "alarm_code": np.uint32(0),
+            "controller_tick": np.uint64(0),
             "timestamp": time.now(),
         }
         self.worker = self.pub
@@ -429,8 +437,13 @@ class KassowArm(Node):
             t_diag = time.now()
             state = self._bridge.get_state()
             tick_0, sends_j_0, sends_l_0 = state.tick, state.stream_j_sends, state.stream_l_sends
+            last_published_tick = 0
             while not self.exit_event.is_set():
                 state = self._bridge.get_state()
+                if state.tick <= 0 or state.tick == last_published_tick:
+                    rate.precise_sleep()
+                    continue
+                last_published_tick = state.tick
 
                 # Store current state in ring buffer
                 data = {
@@ -439,6 +452,7 @@ class KassowArm(Node):
                     "joint_qd": np.array(state.joint_qd, dtype=self.dtype),
                     "joint_tau": np.array(state.joint_tau, dtype=self.dtype),
                     "alarm_code": np.uint32(state.alarm_code),
+                    "controller_tick": np.uint64(state.tick),
                     "timestamp": time.now(),
                 }
                 self.ring_buffer.put(data)
@@ -538,6 +552,16 @@ class KassowArm(Node):
                         reqs = [{k: reqs[k][i] for k in reqs.keys()} for i in range(len(reqs["type"]))]
                 except queue.Empty:
                     reqs = []
+                reqs = self._coalesce_stream_requests(reqs)
+                if any(request.get("type") == RequestType.STOP_MOTION.value for request in reqs):
+                    self._cancel_motion()
+                    last_pose = None
+                    last_joint_q = None
+                    pose_filter = None
+                    joint_filter = None
+                    idle_cycles = 0
+                    rate.precise_sleep()
+                    continue
                 if not reqs:
                     idle_cycles += 1
                     # Only hold with zero qd after Vel mode was entered by a real
@@ -745,6 +769,25 @@ class KassowArm(Node):
         except KeyboardInterrupt:
             pass
 
+    def _coalesce_stream_requests(self, requests: list[dict]) -> list[dict]:
+        """Keep only the latest streaming goal, but preserve discrete or stop requests."""
+        streaming = {
+            RobotController.TASK_POS: RequestType.MOVEL,
+            RobotController.TASK_POS_IK: RequestType.MOVEL,
+            RobotController.JOINT_POS: RequestType.MOVEJ,
+            RobotController.JOINT_VEL: RequestType.SPEEDJ,
+        }[self.robot_controller]
+        if len(requests) > 1 and all(request.get("type") == streaming.value for request in requests):
+            return requests[-1:]
+        return requests
+
+    def _cancel_motion(self) -> None:
+        self._bridge.cancel_motion()
+        self._vel_mode_active = False
+        self._qd_filter = None
+        self._last_qd = None
+        self._last_qd_t = None
+
     def _send_vel_cmd(self, qd: np.ndarray) -> None:
         """Publish a VelCmd (directJControl path) with optional joint limits.
 
@@ -829,6 +872,13 @@ class KassowArm(Node):
     def get_all_state(self):
         return self.ring_buffer.get_all()
 
+    def stop_motion(self) -> None:
+        """Discard queued and streamed motion targets without acknowledging controller alarms."""
+        schema = self.example_request
+        if schema is None:
+            raise RuntimeError("The arm request schema is not initialized")
+        self.request_queue.put({**schema, "type": RequestType.STOP_MOTION.value, "target_time": time.now()})
+
     def moveL(self, target_eef_pose, target_time):
         """Cartesian waypoint as RIO pose6 ``[xyz, rotvec]``.
 
@@ -836,7 +886,8 @@ class KassowArm(Node):
         solved with local IK for ``task_pos_ik``. `target_time` is unused.
         """
         target_eef_pose = np.array(target_eef_pose, dtype=self.dtype)
-        assert target_eef_pose.shape == (6,)
+        if target_eef_pose.shape != (6,) or not np.isfinite(target_eef_pose).all():
+            raise ValueError("A Cartesian target must be a finite 6D xyz/rotvec vector")
         req = {
             "type": RequestType.MOVEL.value,
             "target_eef_pose": target_eef_pose,
@@ -851,7 +902,8 @@ class KassowArm(Node):
         accepted for interface compatibility but unused.
         """
         target_joint_q = np.array(target_joint_q, dtype=self.dtype)
-        assert target_joint_q.shape == (self.num_joints,)
+        if target_joint_q.shape != (self.num_joints,) or not np.isfinite(target_joint_q).all():
+            raise ValueError("A joint target must be a finite 7D vector")
         req = {
             "type": RequestType.MOVEJ.value,
             "target_joint_q": target_joint_q,
@@ -867,7 +919,8 @@ class KassowArm(Node):
         naive directJ position stream would. `target_time` is unused.
         """
         target_joint_qd = np.array(target_joint_qd, dtype=self.dtype)
-        assert target_joint_qd.shape == (self.num_joints,)
+        if target_joint_qd.shape != (self.num_joints,) or not np.isfinite(target_joint_qd).all():
+            raise ValueError("A joint velocity must be a finite 7D vector")
         req = {
             "type": RequestType.SPEEDJ.value,
             "target_joint_qd": target_joint_qd,
