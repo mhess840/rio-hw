@@ -110,6 +110,10 @@ public:
     bool connect();
     void start();
     void stop();
+    // Join the real-time thread and drop the open segment without disconnecting,
+    // so clear_recoverable_alarms can waitSync on this thread. Does not send RESUME.
+    void pause_rt();
+    void resume_rt();
     bool is_running() const { return running_.load(std::memory_order_relaxed); }
 
     State get_state() const;

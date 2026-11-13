@@ -177,10 +177,27 @@ void KordBridge::start()
     rt_thread_ = std::thread(&KordBridge::rt_loop, this);
 }
 
-void KordBridge::stop()
+void KordBridge::pause_rt()
 {
     running_.store(false, std::memory_order_relaxed);
     if (rt_thread_.joinable()) rt_thread_.join();
+    // The RT thread owns the stream integrators. Reset them after the join so
+    // the next start re-anchors on the measured pose instead of the cut trajectory.
+    cancel_motion();
+    stream_l_active_ = false;
+    stream_l_have_curr_ = false;
+    stream_j_counter_ = 0;
+    stream_l_counter_ = 0;
+}
+
+void KordBridge::resume_rt()
+{
+    start();
+}
+
+void KordBridge::stop()
+{
+    pause_rt();
     if (kord_) kord_->disconnect();
 }
 

@@ -1,4 +1,5 @@
 import queue
+import threading
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
@@ -160,6 +161,7 @@ class KassowArm(Node):
         "speedJ",
         "moveJ_discrete",
         "stop_motion",
+        "recover_alarms",
     ]
     __pub__ = True
     __req__ = True
@@ -409,6 +411,12 @@ class KassowArm(Node):
         self._diag_qd_sum = 0.0
         self._diag_dp_sum = 0.0
 
+        # Held by req() while it sends, and by recover_alarms() while the RT
+        # thread is paused. A paused req iteration must not stream a stale goal.
+        self._commands_paused = False
+        self._command_gate = threading.Lock()
+        self._reanchor = False
+
         self.example_request = {
             "type": next(iter(RequestType)).value,
             **example_request_params,
@@ -532,240 +540,256 @@ class KassowArm(Node):
             rate = time.Rate(self.freq)
             self.req_ready_event.set()
             while not self.exit_event.is_set():
-                if not self._fk_checked and self._kin is not None:
-                    state = self._bridge.get_state()
-                    # tick advances only after the RT loop has fetched real status.
-                    if state.tick > 0:
-                        self._kin.check_fk_alignment(
-                            np.array(state.joint_q, dtype=np.float64),
-                            np.array(state.tcp_pose, dtype=np.float64),
-                        )
-                        self._fk_checked = True
+                with self._command_gate:
+                    if self._commands_paused:
+                        paused = True
                     else:
-                        rate.precise_sleep()
-                        continue
-
-                # Fetch requests from queue
-                try:
-                    reqs = self.request_queue.get_all()
-                    if isinstance(reqs, dict):
-                        reqs = [{k: reqs[k][i] for k in reqs.keys()} for i in range(len(reqs["type"]))]
-                except queue.Empty:
-                    reqs = []
-                reqs = self._coalesce_stream_requests(reqs)
-                if any(request.get("type") == RequestType.STOP_MOTION.value for request in reqs):
-                    self._cancel_motion()
-                    last_pose = None
-                    last_joint_q = None
-                    pose_filter = None
-                    joint_filter = None
-                    idle_cycles = 0
-                    rate.precise_sleep()
-                    continue
-                if not reqs:
-                    idle_cycles += 1
-                    # Only hold with zero qd after Vel mode was entered by a real
-                    # command. Sending directJControl at startup re-latches
-                    # MOVE_IN_INVALID_MOTION_STATE on CBun ≥3.0.4.
-                    if (
-                        self.robot_controller == RobotController.TASK_POS_IK
-                        and self._vel_mode_active
-                        and idle_cycles >= max(2, int(self.freq * _IK_IDLE_HOLD_S))
-                    ):
-                        state = self._bridge.get_state()
-                        if not state.alarm_code:
-                            self._send_vel_cmd(zeros7)
-                elif idle_cycles > 0:
-                    # Teleop stopped sending (hands off). Re-anchor so the next
-                    # move starts from the measured pose with a fresh filter.
-                    state = self._bridge.get_state()
-                    last_pose = kord_tcp_to_pose6(state.tcp_pose).astype(self.dtype)
-                    last_joint_q = np.array(state.joint_q, dtype=self.dtype)
-                    if pose_filter is not None:
-                        pose_filter.s = last_pose.copy()
-                    if joint_filter is not None:
-                        joint_filter.s = last_joint_q.copy()
-                    self._qd_filter = None
-                    idle_cycles = 0
-                for r in reqs:
-                    req = Request(RequestType(r.pop("type")), r)
-                    state = self._bridge.get_state()
-
-                    if req.type == RequestType.MOVEL and self.robot_controller == RobotController.TASK_POS_IK:
-                        pose_meas = kord_tcp_to_pose6(state.tcp_pose).astype(self.dtype)
-                        joint_q_now = np.array(state.joint_q, dtype=self.dtype)
-                        if last_pose is None or state.alarm_code:
-                            last_pose = pose_meas
+                        paused = False
+                        if self._reanchor:
+                            last_pose = None
+                            last_joint_q = None
+                            pose_filter = None
+                            joint_filter = None
                             self._qd_filter = None
                             self._last_qd = None
                             self._last_qd_t = None
-                        if state.alarm_code:
+                            self._reanchor = False
+                        if not self._fk_checked and self._kin is not None:
+                            state = self._bridge.get_state()
+                            # tick advances only after the RT loop has fetched real status.
+                            if state.tick > 0:
+                                self._kin.check_fk_alignment(
+                                    np.array(state.joint_q, dtype=np.float64),
+                                    np.array(state.tcp_pose, dtype=np.float64),
+                                )
+                                self._fk_checked = True
+                            else:
+                                rate.precise_sleep()
+                                continue
+
+                        # Fetch requests from queue
+                        try:
+                            reqs = self.request_queue.get_all()
+                            if isinstance(reqs, dict):
+                                reqs = [{k: reqs[k][i] for k in reqs.keys()} for i in range(len(reqs["type"]))]
+                        except queue.Empty:
+                            reqs = []
+                        reqs = self._coalesce_stream_requests(reqs)
+                        if any(request.get("type") == RequestType.STOP_MOTION.value for request in reqs):
+                            self._cancel_motion()
+                            last_pose = None
+                            last_joint_q = None
+                            pose_filter = None
+                            joint_filter = None
+                            idle_cycles = 0
+                            rate.precise_sleep()
                             continue
-                        target = np.array(req.params["target_eef_pose"], dtype=self.dtype)
-                        # Relative Cartesian lead (measured TCP frame). Do NOT
-                        # low-pass the pose here — alpha=0.15 left ||qd|| near
-                        # zero. Smooth only the resulting joint velocity.
-                        dp = target[:3] - pose_meas[:3]
-                        dist = float(np.linalg.norm(dp))
-                        # Cap lead so a stuck teleop integrator cannot demand a
-                        # huge corrective velocity in one tick.
-                        lead_pos = max(float(self._max_step[0]) * 4.0, 0.01)
-                        if dist > lead_pos:
-                            dp = dp * (lead_pos / dist)
-                            dist = lead_pos
-
-                        r_meas = R.from_rotvec(pose_meas[3:])
-                        r_tgt = R.from_rotvec(target[3:])
-                        # World-frame error: LOCAL_WORLD_ALIGNED Jacobian expects ω_world.
-                        # (Body-frame r_meas.inv()*r_tgt was wrong and let translation
-                        # couple into orientation without a usable correction.)
-                        dR = r_tgt * r_meas.inv()
-                        ang = float(dR.magnitude())
-                        if ang < _IK_ORIENT_HOLD:
-                            omega = np.zeros(3, dtype=self.dtype)
-                        else:
-                            lead_rot = max(float(self._max_step[3]) * 4.0, 0.05)
-                            if ang > lead_rot:
-                                dR = R.from_rotvec(dR.as_rotvec() * (lead_rot / ang))
-                                ang = lead_rot
-                            omega = dR.as_rotvec() * self.ik_kp
-
-                        if dist < IDLE_EPS and ang < _IK_ORIENT_HOLD:
-                            qd = zeros7
-                        else:
-                            # Task-space P → twist, then weighted Jacobian DLS → qd.
-                            # Tracks Spacemouse lead at up to max_*_speed instead
-                            # of the near-zero rates from position-IK * small kp.
-                            twist = np.zeros(6, dtype=np.float64)
-                            twist[:3] = self.ik_kp * dp
-                            sp = float(np.linalg.norm(twist[:3]))
-                            if sp > self.max_pos_speed > 0.0:
-                                twist[:3] *= self.max_pos_speed / sp
-                            twist[3:] = omega
-                            sr = float(np.linalg.norm(twist[3:]))
-                            if sr > self.max_rot_speed > 0.0:
-                                twist[3:] *= self.max_rot_speed / sr
-                            qd = self._kin.twist_to_qd(joint_q_now, twist)
-                            qd = np.clip(qd, -self.max_motor_speed, self.max_motor_speed).astype(
-                                self.dtype
-                            )
-                        if self.lowpass_alpha is not None:
-                            if self._qd_filter is None:
-                                self._qd_filter = LowPassFilter(alpha=self.lowpass_alpha, initial=zeros7)
-                            qd = np.asarray(self._qd_filter(qd), dtype=self.dtype)
-                        self._send_vel_cmd(qd)
-                        self._vel_mode_active = True
-                        last_pose = target
-                        if self.log_diagnostics:
-                            self._diag_vel_n += 1
-                            self._diag_qd_sum += float(np.linalg.norm(qd))
-                            self._diag_dp_sum += dist
-
-                    elif req.type == RequestType.MOVEL:
-                        pose_now = kord_tcp_to_pose6(state.tcp_pose).astype(self.dtype)
-                        if last_pose is None or state.alarm_code:
-                            # First command, or motion is blocked: re-anchor on
-                            # the measured pose. Otherwise the caller's target
-                            # keeps integrating and the arm lurches toward a
-                            # stale pose the moment the alarm clears.
-                            last_pose = pose_now
+                        if not reqs:
+                            idle_cycles += 1
+                            # Only hold with zero qd after Vel mode was entered by a real
+                            # command. Sending directJControl at startup re-latches
+                            # MOVE_IN_INVALID_MOTION_STATE on CBun ≥3.0.4.
+                            if (
+                                self.robot_controller == RobotController.TASK_POS_IK
+                                and self._vel_mode_active
+                                and idle_cycles >= max(2, int(self.freq * _IK_IDLE_HOLD_S))
+                            ):
+                                state = self._bridge.get_state()
+                                if not state.alarm_code:
+                                    self._send_vel_cmd(zeros7)
+                        elif idle_cycles > 0:
+                            # Teleop stopped sending (hands off). Re-anchor so the next
+                            # move starts from the measured pose with a fresh filter.
+                            state = self._bridge.get_state()
+                            last_pose = kord_tcp_to_pose6(state.tcp_pose).astype(self.dtype)
+                            last_joint_q = np.array(state.joint_q, dtype=self.dtype)
                             if pose_filter is not None:
-                                pose_filter.s = pose_now.copy()
-                        if state.alarm_code:
-                            continue
-                        target = np.array(req.params["target_eef_pose"], dtype=self.dtype)
-                        target = np.clip(target, pose_now - self._env_delta, pose_now + self._env_delta)
-                        # Rate-limit command jumps so via-points stay continuous.
-                        target = np.clip(target, last_pose - self._max_step, last_pose + self._max_step)
-                        if self.lowpass_alpha is not None and pose_filter is None:
-                            pose_filter = LowPassFilter(alpha=self.lowpass_alpha, initial=pose_now)
-                        if pose_filter is not None:
-                            target = np.asarray(pose_filter(target), dtype=self.dtype)
-                        if not self._is_new_waypoint(target, last_pose):
-                            continue
-                        cmd = _kord_bridge.StreamLCmd()
-                        cmd.tcp = pose6_to_kord_tcp(target).tolist()
-                        cmd.tt = tracking_type
-                        cmd.tt_val = self._tracking_val
-                        cmd.bt = blend_type
-                        cmd.bt_val = self.stream_l_bt
-                        cmd.max_pos_speed = self.max_pos_speed
-                        cmd.max_rot_speed = self.max_rot_speed
-                        self._bridge.set_stream_l_command(cmd)
-                        last_pose = target
-
-                    elif req.type == RequestType.MOVEJ:
-                        joint_q_now = np.array(state.joint_q, dtype=self.dtype)
-                        if last_joint_q is None or state.alarm_code:
-                            last_joint_q = joint_q_now
+                                pose_filter.s = last_pose.copy()
                             if joint_filter is not None:
-                                joint_filter.s = joint_q_now.copy()
-                        if state.alarm_code:
-                            continue
-                        target = np.array(req.params["target_joint_q"], dtype=self.dtype)
-                        if self.joint_limits is not None:
-                            target = np.clip(target, *self.joint_limits)
-                        # Anchoring on the measured position means the first
-                        # command can only advance one step from where the arm
-                        # actually is, whatever the caller asked for.
-                        target = np.clip(target, last_joint_q - self._max_joint_step, last_joint_q + self._max_joint_step)
-                        if self.lowpass_alpha is not None and joint_filter is None:
-                            joint_filter = LowPassFilter(alpha=self.lowpass_alpha, initial=joint_q_now)
-                        if joint_filter is not None:
-                            target = np.asarray(joint_filter(target), dtype=self.dtype)
-                        if np.allclose(target, last_joint_q, rtol=0, atol=IDLE_EPS):
-                            continue
-                        cmd = _kord_bridge.StreamJCmd()
-                        cmd.q = target.tolist()
-                        cmd.tt_val = self.stream_j_speed
-                        self._bridge.set_stream_j_command(cmd)
-                        last_joint_q = target
+                                joint_filter.s = last_joint_q.copy()
+                            self._qd_filter = None
+                            idle_cycles = 0
+                        for r in reqs:
+                            req = Request(RequestType(r.pop("type")), r)
+                            state = self._bridge.get_state()
 
-                    elif req.type == RequestType.SPEEDJ:
-                        # VelCmd: C++ integrates qd and calls directJControl every
-                        # waitSync. Keep sending (including zeros) so the RT loop
-                        # stays in Vel mode and holds when hands-off.
-                        if state.alarm_code:
-                            self._last_qd = None
-                            self._last_qd_t = None
-                            continue
-                        qd = np.array(req.params["target_joint_qd"], dtype=self.dtype)
-                        qd = np.clip(qd, -self.max_motor_speed, self.max_motor_speed)
-                        self._send_vel_cmd(qd)
-                        self._vel_mode_active = True
+                            if req.type == RequestType.MOVEL and self.robot_controller == RobotController.TASK_POS_IK:
+                                pose_meas = kord_tcp_to_pose6(state.tcp_pose).astype(self.dtype)
+                                joint_q_now = np.array(state.joint_q, dtype=self.dtype)
+                                if last_pose is None or state.alarm_code:
+                                    last_pose = pose_meas
+                                    self._qd_filter = None
+                                    self._last_qd = None
+                                    self._last_qd_t = None
+                                if state.alarm_code:
+                                    continue
+                                target = np.array(req.params["target_eef_pose"], dtype=self.dtype)
+                                # Relative Cartesian lead (measured TCP frame). Do NOT
+                                # low-pass the pose here — alpha=0.15 left ||qd|| near
+                                # zero. Smooth only the resulting joint velocity.
+                                dp = target[:3] - pose_meas[:3]
+                                dist = float(np.linalg.norm(dp))
+                                # Cap lead so a stuck teleop integrator cannot demand a
+                                # huge corrective velocity in one tick.
+                                lead_pos = max(float(self._max_step[0]) * 4.0, 0.01)
+                                if dist > lead_pos:
+                                    dp = dp * (lead_pos / dist)
+                                    dist = lead_pos
 
-                    elif req.type == RequestType.MOVEJ_DISCRETE:
-                        # One-shot ctl_->moveJ (TT_TIME, OT_STOPPOINT). Stop VelCmd
-                        # first — mixing streamed Vel/streamJ with this is what
-                        # trips JTORQUE. Idle zeros stay off until the next teleop
-                        # moveL re-enters Vel from the measured pose.
-                        if state.alarm_code:
-                            logger.warning(
-                                "KassowArm: skip discrete moveJ, alarm "
-                                f"{describe_alarm(state.alarm_code)}"
-                            )
-                            continue
-                        self._vel_mode_active = False
-                        self._qd_filter = None
-                        self._last_qd = None
-                        self._last_qd_t = None
-                        target = np.array(req.params["target_joint_q"], dtype=self.dtype)
-                        if self.joint_limits is not None:
-                            target = np.clip(target, *self.joint_limits)
-                        duration = max(float(req.params["duration_s"]), 0.2)
-                        cmd = _kord_bridge.MoveJCmd()
-                        cmd.q = target.tolist()
-                        cmd.tt_val = duration
-                        cmd.bt_val = 0.0
-                        self._bridge.queue_move_j(cmd)
-                        logger.info(
-                            f"KassowArm: discrete moveJ duration={duration:.2f}s "
-                            f"q={np.round(target, 3).tolist()}"
-                        )
+                                r_meas = R.from_rotvec(pose_meas[3:])
+                                r_tgt = R.from_rotvec(target[3:])
+                                # World-frame error: LOCAL_WORLD_ALIGNED Jacobian expects ω_world.
+                                # (Body-frame r_meas.inv()*r_tgt was wrong and let translation
+                                # couple into orientation without a usable correction.)
+                                dR = r_tgt * r_meas.inv()
+                                ang = float(dR.magnitude())
+                                if ang < _IK_ORIENT_HOLD:
+                                    omega = np.zeros(3, dtype=self.dtype)
+                                else:
+                                    lead_rot = max(float(self._max_step[3]) * 4.0, 0.05)
+                                    if ang > lead_rot:
+                                        dR = R.from_rotvec(dR.as_rotvec() * (lead_rot / ang))
+                                        ang = lead_rot
+                                    omega = dR.as_rotvec() * self.ik_kp
 
-                    else:
-                        raise ValueError(req.type)
-                rate.precise_sleep()
+                                if dist < IDLE_EPS and ang < _IK_ORIENT_HOLD:
+                                    qd = zeros7
+                                else:
+                                    # Task-space P → twist, then weighted Jacobian DLS → qd.
+                                    # Tracks Spacemouse lead at up to max_*_speed instead
+                                    # of the near-zero rates from position-IK * small kp.
+                                    twist = np.zeros(6, dtype=np.float64)
+                                    twist[:3] = self.ik_kp * dp
+                                    sp = float(np.linalg.norm(twist[:3]))
+                                    if sp > self.max_pos_speed > 0.0:
+                                        twist[:3] *= self.max_pos_speed / sp
+                                    twist[3:] = omega
+                                    sr = float(np.linalg.norm(twist[3:]))
+                                    if sr > self.max_rot_speed > 0.0:
+                                        twist[3:] *= self.max_rot_speed / sr
+                                    qd = self._kin.twist_to_qd(joint_q_now, twist)
+                                    qd = np.clip(qd, -self.max_motor_speed, self.max_motor_speed).astype(
+                                        self.dtype
+                                    )
+                                if self.lowpass_alpha is not None:
+                                    if self._qd_filter is None:
+                                        self._qd_filter = LowPassFilter(alpha=self.lowpass_alpha, initial=zeros7)
+                                    qd = np.asarray(self._qd_filter(qd), dtype=self.dtype)
+                                self._send_vel_cmd(qd)
+                                self._vel_mode_active = True
+                                last_pose = target
+                                if self.log_diagnostics:
+                                    self._diag_vel_n += 1
+                                    self._diag_qd_sum += float(np.linalg.norm(qd))
+                                    self._diag_dp_sum += dist
+
+                            elif req.type == RequestType.MOVEL:
+                                pose_now = kord_tcp_to_pose6(state.tcp_pose).astype(self.dtype)
+                                if last_pose is None or state.alarm_code:
+                                    # First command, or motion is blocked: re-anchor on
+                                    # the measured pose. Otherwise the caller's target
+                                    # keeps integrating and the arm lurches toward a
+                                    # stale pose the moment the alarm clears.
+                                    last_pose = pose_now
+                                    if pose_filter is not None:
+                                        pose_filter.s = pose_now.copy()
+                                if state.alarm_code:
+                                    continue
+                                target = np.array(req.params["target_eef_pose"], dtype=self.dtype)
+                                target = np.clip(target, pose_now - self._env_delta, pose_now + self._env_delta)
+                                # Rate-limit command jumps so via-points stay continuous.
+                                target = np.clip(target, last_pose - self._max_step, last_pose + self._max_step)
+                                if self.lowpass_alpha is not None and pose_filter is None:
+                                    pose_filter = LowPassFilter(alpha=self.lowpass_alpha, initial=pose_now)
+                                if pose_filter is not None:
+                                    target = np.asarray(pose_filter(target), dtype=self.dtype)
+                                if not self._is_new_waypoint(target, last_pose):
+                                    continue
+                                cmd = _kord_bridge.StreamLCmd()
+                                cmd.tcp = pose6_to_kord_tcp(target).tolist()
+                                cmd.tt = tracking_type
+                                cmd.tt_val = self._tracking_val
+                                cmd.bt = blend_type
+                                cmd.bt_val = self.stream_l_bt
+                                cmd.max_pos_speed = self.max_pos_speed
+                                cmd.max_rot_speed = self.max_rot_speed
+                                self._bridge.set_stream_l_command(cmd)
+                                last_pose = target
+
+                            elif req.type == RequestType.MOVEJ:
+                                joint_q_now = np.array(state.joint_q, dtype=self.dtype)
+                                if last_joint_q is None or state.alarm_code:
+                                    last_joint_q = joint_q_now
+                                    if joint_filter is not None:
+                                        joint_filter.s = joint_q_now.copy()
+                                if state.alarm_code:
+                                    continue
+                                target = np.array(req.params["target_joint_q"], dtype=self.dtype)
+                                if self.joint_limits is not None:
+                                    target = np.clip(target, *self.joint_limits)
+                                # Anchoring on the measured position means the first
+                                # command can only advance one step from where the arm
+                                # actually is, whatever the caller asked for.
+                                target = np.clip(target, last_joint_q - self._max_joint_step, last_joint_q + self._max_joint_step)
+                                if self.lowpass_alpha is not None and joint_filter is None:
+                                    joint_filter = LowPassFilter(alpha=self.lowpass_alpha, initial=joint_q_now)
+                                if joint_filter is not None:
+                                    target = np.asarray(joint_filter(target), dtype=self.dtype)
+                                if np.allclose(target, last_joint_q, rtol=0, atol=IDLE_EPS):
+                                    continue
+                                cmd = _kord_bridge.StreamJCmd()
+                                cmd.q = target.tolist()
+                                cmd.tt_val = self.stream_j_speed
+                                self._bridge.set_stream_j_command(cmd)
+                                last_joint_q = target
+
+                            elif req.type == RequestType.SPEEDJ:
+                                # VelCmd: C++ integrates qd and calls directJControl every
+                                # waitSync. Keep sending (including zeros) so the RT loop
+                                # stays in Vel mode and holds when hands-off.
+                                if state.alarm_code:
+                                    self._last_qd = None
+                                    self._last_qd_t = None
+                                    continue
+                                qd = np.array(req.params["target_joint_qd"], dtype=self.dtype)
+                                qd = np.clip(qd, -self.max_motor_speed, self.max_motor_speed)
+                                self._send_vel_cmd(qd)
+                                self._vel_mode_active = True
+
+                            elif req.type == RequestType.MOVEJ_DISCRETE:
+                                # One-shot ctl_->moveJ (TT_TIME, OT_STOPPOINT). Stop VelCmd
+                                # first — mixing streamed Vel/streamJ with this is what
+                                # trips JTORQUE. Idle zeros stay off until the next teleop
+                                # moveL re-enters Vel from the measured pose.
+                                if state.alarm_code:
+                                    logger.warning(
+                                        "KassowArm: skip discrete moveJ, alarm "
+                                        f"{describe_alarm(state.alarm_code)}"
+                                    )
+                                    continue
+                                self._vel_mode_active = False
+                                self._qd_filter = None
+                                self._last_qd = None
+                                self._last_qd_t = None
+                                target = np.array(req.params["target_joint_q"], dtype=self.dtype)
+                                if self.joint_limits is not None:
+                                    target = np.clip(target, *self.joint_limits)
+                                duration = max(float(req.params["duration_s"]), 0.2)
+                                cmd = _kord_bridge.MoveJCmd()
+                                cmd.q = target.tolist()
+                                cmd.tt_val = duration
+                                cmd.bt_val = 0.0
+                                self._bridge.queue_move_j(cmd)
+                                logger.info(
+                                    f"KassowArm: discrete moveJ duration={duration:.2f}s "
+                                    f"q={np.round(target, 3).tolist()}"
+                                )
+
+                            else:
+                                raise ValueError(req.type)
+                        rate.precise_sleep()
+                if paused:
+                    rate.precise_sleep()
         except KeyboardInterrupt:
             pass
 
@@ -878,6 +902,79 @@ class KassowArm(Node):
         if schema is None:
             raise RuntimeError("The arm request schema is not initialized")
         self.request_queue.put({**schema, "type": RequestType.STOP_MOTION.value, "target_time": time.now()})
+
+    def recover_alarms(self, timeout_s: float = 2.0) -> bool:
+        """Pause the real-time loop, clear recoverable latches, and start it again.
+
+        Sends CLEAR_HALT, CBUN_EVENT, and UNSUSPEND. It does not send RESUME and
+        it does not disconnect, so the session stays up. The request thread sends
+        nothing while this runs, and the next goal is taken from the measured pose.
+
+        Args:
+            timeout_s: How long to wait for a published sample newer than the
+                pre-clear tick. The physical emergency stop has to be released
+                first; otherwise the controller latches the alarm again.
+
+        Returns:
+            True only when that new sample has ``alarm_code`` 0. False means the
+            caller must not move.
+        """
+        if not np.isfinite(timeout_s) or timeout_s <= 0.0:
+            raise ValueError("timeout_s must be finite and positive")
+        if not hasattr(self._bridge, "pause_rt"):
+            raise RuntimeError(f"The installed _kord_bridge cannot pause without disconnecting. {BUILD_HINT}")
+
+        previous = self.get_state()
+        previous_stamp = float(previous.get("timestamp", 0.0)) if isinstance(previous, dict) else 0.0
+        try:
+            with self._command_gate:
+                self._commands_paused = True
+                self._cancel_motion()
+                self._bridge.pause_rt()
+                try:
+                    cleared = bool(self._bridge.clear_recoverable_alarms())
+                except Exception:
+                    logger.exception("KassowArm: clear_recoverable_alarms failed")
+                    cleared = False
+                finally:
+                    if not self._bridge.is_running():
+                        self._bridge.resume_rt()
+                tick_before = int(self._bridge.get_state().tick)
+        except Exception:
+            self._release_after_recover()
+            raise
+        logger.info("KassowArm: alarm clear accepted={}", cleared)
+
+        deadline = time.now() + float(timeout_s)
+        fresh_alarm = None
+        while time.now() < deadline:
+            state = self.get_state()
+            if isinstance(state, dict):
+                try:
+                    alarm = int(state.get("alarm_code", 1) or 0)
+                    tick = int(state.get("controller_tick", 0) or 0)
+                    stamp = float(state["timestamp"])
+                except (KeyError, TypeError, ValueError):
+                    alarm, tick, stamp = 1, 0, 0.0
+                if tick > tick_before and stamp > previous_stamp and np.isfinite(stamp):
+                    fresh_alarm = alarm
+                    if alarm == 0:
+                        self._release_after_recover()
+                        logger.info("KassowArm: recoverable alarms cleared")
+                        return True
+            time.sleep(0.02)
+        self._release_after_recover()
+        if fresh_alarm:
+            logger.warning("KassowArm: alarm 0x{:08x} still present after clear", fresh_alarm)
+        else:
+            logger.warning("KassowArm: no fresh alarm-free sample after clear")
+        return False
+
+    def _release_after_recover(self) -> None:
+        """Let req() send again, re-anchored on the next measured pose."""
+        with self._command_gate:
+            self._reanchor = True
+            self._commands_paused = False
 
     def moveL(self, target_eef_pose, target_time):
         """Cartesian waypoint as RIO pose6 ``[xyz, rotvec]``.
