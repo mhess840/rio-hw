@@ -1,4 +1,8 @@
 import asyncio
+import codecs
+import os
+import select
+import sys
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -14,6 +18,38 @@ except ImportError as e:
         raise e
     else:
         sshkeyboard = None  # type: ignore
+
+_stdin_decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
+
+
+def _read_stdin_ready(amount: int) -> str | None:
+    """Read up to ``amount`` characters from stdin without ever blocking.
+
+    sshkeyboard relies on ``O_NONBLOCK`` to see an empty read, which is how it
+    detects a key release. That flag lives on the terminal's shared file
+    description, so anything that makes stdout blocking (``os.set_blocking``)
+    also makes stdin blocking. The listener then waits for the next character,
+    never releases the key, and a second press of the same key is lost. Polling
+    with ``select`` keeps the read non-blocking whatever the flag says.
+
+    Args:
+        amount: Maximum number of bytes to read.
+
+    Returns:
+        The decoded characters, ``""`` when nothing is waiting, or ``None`` on
+        a read error.
+    """
+    try:
+        fd = sys.stdin.fileno()
+        if not select.select([fd], [], [], 0)[0]:
+            return ""
+        return _stdin_decoder.decode(os.read(fd, amount))
+    except (OSError, ValueError):
+        return None
+
+
+if sshkeyboard is not None and sys.platform != "win32":
+    sshkeyboard._read_unix_stdin = _read_stdin_ready
 
 # USB HID usage codes for special keys (matching pynput's Key.value.vk values where possible).
 _SPECIAL_KEY_CODES = {
@@ -83,13 +119,18 @@ class SshKeyboard(Node):
         alphanumeric_keys = set()
         special_keys = set()
 
+        # alphanumeric_state is int8, so only ASCII fits; 'ä' would kill the thread.
         def on_press(key):
+            if len(key) == 1 and not key.isascii():
+                return
             if len(key) == 1:
                 alphanumeric_keys.add(ord(key))
             else:
                 special_keys.add(_SPECIAL_KEY_CODES.get(key, hash(key) % (2**31)))
 
         def on_release(key):
+            if len(key) == 1 and not key.isascii():
+                return
             if len(key) == 1:
                 alphanumeric_keys.discard(ord(key))
             else:
