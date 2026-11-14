@@ -1,3 +1,4 @@
+import signal
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -6,6 +7,10 @@ from .. import time
 from ..middleware import ClientFactory, ServerFactory
 from ..node import Node
 
+# avp_stream registers its own SIGINT/SIGTERM handlers at import time; they raise
+# KeyboardInterrupt from inside cleanup and turn one Ctrl-C into a crash on exit.
+# Keep whatever handlers the process had before.
+_saved_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
 try:
     import avp_stream
 except ImportError as e:
@@ -13,6 +18,13 @@ except ImportError as e:
         raise e
     else:
         avp_stream = None  # type: ignore
+finally:
+    for _sig, _handler in _saved_handlers.items():
+        if _handler is not None and signal.getsignal(_sig) is not _handler:
+            try:
+                signal.signal(_sig, _handler)
+            except ValueError:  # not the main thread; nothing could be registered there either
+                pass
 
 
 class AvpStream(Node):
