@@ -21,7 +21,10 @@ public:
     struct State {
         std::array<double, kNumJoints> joint_q{};
         std::array<double, kNumJoints> joint_qd{};
-        std::array<double, kNumJoints> joint_tau{};
+        std::array<double, kNumJoints> joint_tau{};        // S_ACTUAL_TRQ: torque estimation
+        std::array<double, kNumJoints> joint_tau_sensed{}; // S_SENSED_TRQ: sensed joint torque
+        std::array<double, kNumJoints> joint_tau_dev{};    // S_TRQDEV_SMOOTH: sensed minus model (smoothed)
+        std::array<double, kNumJoints> joint_tau_ref{};    // T_REFERENCE_TRQ: reference torque in Nm
         std::array<double, 6>          tcp_pose{};
         uint64_t                       tick{0};           // every waitSync — divide by elapsed s → sync Hz
         uint64_t                       stream_j_sends{0}; // every moveJ sent  — divide by elapsed s → cmd Hz

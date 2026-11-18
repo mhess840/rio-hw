@@ -555,6 +555,9 @@ void KordBridge::rt_loop()
             current_state_.joint_q        = prev_sensor_q;
             current_state_.joint_qd       = rcv_->getJoint(EJV::S_ACTUAL_QD);
             current_state_.joint_tau      = rcv_->getJoint(EJV::S_ACTUAL_TRQ);
+            current_state_.joint_tau_sensed = rcv_->getJoint(EJV::S_SENSED_TRQ);
+            current_state_.joint_tau_dev    = rcv_->getJoint(EJV::S_TRQDEV_SMOOTH);
+            current_state_.joint_tau_ref    = rcv_->getJoint(EJV::T_REFERENCE_TRQ);
             current_state_.tcp_pose       = prev_tcp;
             current_state_.stream_j_sends = stream_j_sends_local;
             current_state_.stream_l_sends = stream_l_sends_local;
