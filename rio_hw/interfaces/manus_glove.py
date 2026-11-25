@@ -141,6 +141,7 @@ def _features(raw: list[dict[str, Any]], thumb_chord_w: float) -> np.ndarray:
 # Compatible with the JSON format used by glove_to_inspire_calibrated_clean.py
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GloveCalibration:
     """Per-user calibration mapping raw skeleton features to [0, 1]."""
@@ -156,8 +157,7 @@ class GloveCalibration:
     @property
     def thumb_extra(self) -> bool:
         return all(
-            v is not None
-            for v in (self.thumb_flex_open, self.thumb_flex_closed, self.thumb_rot_open, self.thumb_rot_closed)
+            v is not None for v in (self.thumb_flex_open, self.thumb_flex_closed, self.thumb_rot_open, self.thumb_rot_closed)
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -438,7 +438,10 @@ class ManusGlove(Node):
             print(f"[ManusGlove] Calibration saved to {cal_path.resolve()}", flush=True)
             return cal
 
-        print(f"[ManusGlove] WARNING: calibration file not found at {cal_path.resolve()} and auto_calibrate=False. Running uncalibrated.", flush=True)
+        print(
+            f"[ManusGlove] WARNING: calibration file not found at {cal_path.resolve()} and auto_calibrate=False. Running uncalibrated.",
+            flush=True,
+        )
         return None
 
     # ------------------------------------------------------------------

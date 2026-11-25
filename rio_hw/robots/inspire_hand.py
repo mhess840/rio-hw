@@ -150,13 +150,22 @@ class InspireHand(Node):
                 raw_actual = hand.get_angle_actual(hand_id=self.hand_id)
                 if len(raw_actual) == 6:
                     target_angles = raw_actual.astype(np.float64) / _ANGLE_MAX
-                    print(f"[InspireHand] Initial angles (raw): {raw_actual.tolist()} → norm: {target_angles.round(3).tolist()}", flush=True)
+                    print(
+                        f"[InspireHand] Initial angles (raw): {raw_actual.tolist()} → norm: {target_angles.round(3).tolist()}",
+                        flush=True,
+                    )
                 else:
                     target_angles = np.ones(6, dtype=np.float64) if self.home_to_open else np.zeros(6, dtype=np.float64)
-                    print(f"[InspireHand] WARNING: get_angle_actual returned {len(raw_actual)} values (expected 6). Using default.", flush=True)
+                    print(
+                        f"[InspireHand] WARNING: get_angle_actual returned {len(raw_actual)} values (expected 6). Using default.",
+                        flush=True,
+                    )
             else:
                 target_angles = np.ones(6, dtype=np.float64) if self.home_to_open else np.zeros(6, dtype=np.float64)
-                print(f"[InspireHand] read_state=False — reporting commanded angles as state. Initial target: {target_angles.tolist()}", flush=True)
+                print(
+                    f"[InspireHand] read_state=False — reporting commanded angles as state. Initial target: {target_angles.tolist()}",
+                    flush=True,
+                )
 
             rate = time.Rate(self.freq)
             self.req_ready_event.set()

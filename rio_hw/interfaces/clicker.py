@@ -74,10 +74,7 @@ def find_clicker(device_path: str | None = None) -> str:
         )
         if matches:
             return str(matches[0])
-    raise RuntimeError(
-        "No Logitech Unifying mouse found. Plug in the spare receiver "
-        f"(expected {DEFAULT_DEVICE_PATH})."
-    )
+    raise RuntimeError(f"No Logitech Unifying mouse found. Plug in the spare receiver (expected {DEFAULT_DEVICE_PATH}).")
 
 
 class Clicker(Node):

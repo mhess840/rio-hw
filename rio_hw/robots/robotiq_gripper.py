@@ -272,7 +272,9 @@ class RobotiqGripper(Node):
 
         try:
             if self.robot_controller == RobotController.TASK_POS:
-                curr_pos = gripper.state()["gripper_position"] if self.connection_type == "TCPIP" else 1 - gripper.position() / 255
+                curr_pos = (
+                    gripper.state()["gripper_position"] if self.connection_type == "TCPIP" else 1 - gripper.position() / 255
+                )
                 if self.max_gripper_speed is not None:
                     # joint interpolation
                     curr_time = time.now()

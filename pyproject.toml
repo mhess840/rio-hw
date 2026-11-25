@@ -203,3 +203,6 @@ UDID = "UDID"
 
 [tool.typos.default.extend-identifiers]
 SharedNDArray = "SharedNDArray"
+# Not typos: the Inspire SDK's serial port attribute, the Manus glove's "thumb rotation open".
+_ser = "_ser"
+tro = "tro"

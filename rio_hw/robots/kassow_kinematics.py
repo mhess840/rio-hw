@@ -25,9 +25,7 @@ else:
 
 NUM_JOINTS = 7
 DEFAULT_EE_FRAME = "end_effector"
-DEFAULT_URDF_PATH = str(
-    files("rio_hw").joinpath("assets/kassow/kr2_robot_S00V0000M1018.urdf")
-)
+DEFAULT_URDF_PATH = str(files("rio_hw").joinpath("assets/kassow/kr2_robot_S00V0000M1018.urdf"))
 
 # FK vs measured TCP: warn above this, refuse to enable IK above that.
 _FK_WARN_POS_M = 0.02
@@ -48,13 +46,13 @@ def pose6_to_kord_tcp(pose6: np.ndarray) -> np.ndarray:
     return np.concatenate([pose6[:3], R.from_rotvec(pose6[3:]).as_euler("xyz")])
 
 
-def pose6_to_se3(pose6: np.ndarray) -> "pin.SE3":
+def pose6_to_se3(pose6: np.ndarray) -> pin.SE3:
     """Convert RIO ``[xyz, rotvec]`` to a Pinocchio ``SE3``."""
     pose6 = np.asarray(pose6, dtype=np.float64).reshape(6)
     return pin.SE3(R.from_rotvec(pose6[3:]).as_matrix(), pose6[:3])
 
 
-def se3_to_pose6(oMf: "pin.SE3") -> np.ndarray:
+def se3_to_pose6(oMf: pin.SE3) -> np.ndarray:
     """Convert a Pinocchio ``SE3`` to RIO ``[xyz, rotvec]``."""
     return np.concatenate([oMf.translation, R.from_matrix(oMf.rotation).as_rotvec()])
 
@@ -80,8 +78,7 @@ class KassowKinematics:
 
         if self.model.nq != NUM_JOINTS or self.model.nv != NUM_JOINTS:
             raise ValueError(
-                f"Expected {NUM_JOINTS} actuated DOF in {self.urdf_path}, "
-                f"got nq={self.model.nq}, nv={self.model.nv}"
+                f"Expected {NUM_JOINTS} actuated DOF in {self.urdf_path}, got nq={self.model.nq}, nv={self.model.nv}"
             )
         if not self.model.existFrame(ee_frame):
             raise ValueError(
@@ -89,10 +86,7 @@ class KassowKinematics:
                 f"Frames: {[self.model.frames[i].name for i in range(self.model.nframes)]}"
             )
         self.ee_id = self.model.getFrameId(ee_frame)
-        logger.info(
-            f"KassowKinematics: loaded {self.urdf_path} "
-            f"(nq={self.model.nq}, ee={ee_frame})"
-        )
+        logger.info(f"KassowKinematics: loaded {self.urdf_path} (nq={self.model.nq}, ee={ee_frame})")
 
     def fk(self, q: np.ndarray) -> np.ndarray:
         """Forward kinematics: joint positions → TCP pose6."""
@@ -120,9 +114,7 @@ class KassowKinematics:
         twist = np.asarray(twist, dtype=np.float64).reshape(6)
         pin.forwardKinematics(self.model, self.data, q)
         pin.updateFramePlacements(self.model, self.data)
-        J = pin.computeFrameJacobian(
-            self.model, self.data, q, self.ee_id, pin.LOCAL_WORLD_ALIGNED
-        )
+        J = pin.computeFrameJacobian(self.model, self.data, q, self.ee_id, pin.LOCAL_WORLD_ALIGNED)
         # min ||W (J qd - twist)||² + λ² ||qd||² with W = diag(1,1,1,rw,rw,rw)
         w = np.array([1.0, 1.0, 1.0, rot_weight, rot_weight, rot_weight], dtype=np.float64)
         Wh = np.diag(w)
@@ -151,9 +143,7 @@ class KassowKinematics:
             err = pin.log6(iMd).vector
             if float(np.linalg.norm(err[:3])) < tol_pos and float(np.linalg.norm(err[3:])) < tol_rot:
                 break
-            J = pin.computeFrameJacobian(
-                self.model, self.data, q, self.ee_id, pin.LOCAL
-            )
+            J = pin.computeFrameJacobian(self.model, self.data, q, self.ee_id, pin.LOCAL)
             JJt = J @ J.T
             dq = J.T @ np.linalg.solve(JJt + (damping * damping) * np.eye(6), err)
             q = pin.integrate(self.model, q, step * dq)
@@ -168,18 +158,10 @@ class KassowKinematics:
         fk_pose = self.fk(q_meas)
         pose_meas = kord_tcp_to_pose6(tcp_meas)
         pos_err = float(np.linalg.norm(fk_pose[:3] - pose_meas[:3]))
-        rot_err = float(
-            (R.from_rotvec(fk_pose[3:]).inv() * R.from_rotvec(pose_meas[3:])).magnitude()
-        )
-        msg = (
-            f"KassowKinematics: FK vs measured TCP "
-            f"pos_err={pos_err * 1e3:.1f} mm, rot_err={rot_err * 1e3:.1f} mrad"
-        )
+        rot_err = float((R.from_rotvec(fk_pose[3:]).inv() * R.from_rotvec(pose_meas[3:])).magnitude())
+        msg = f"KassowKinematics: FK vs measured TCP pos_err={pos_err * 1e3:.1f} mm, rot_err={rot_err * 1e3:.1f} mrad"
         if pos_err >= _FK_FAIL_POS_M or rot_err >= _FK_FAIL_ROT_RAD:
-            raise RuntimeError(
-                f"{msg}. URDF/TCP frames look wrong — fix the model or tool offset "
-                "before enabling task_pos_ik."
-            )
+            raise RuntimeError(f"{msg}. URDF/TCP frames look wrong — fix the model or tool offset before enabling task_pos_ik.")
         if pos_err >= _FK_WARN_POS_M or rot_err >= _FK_WARN_ROT_RAD:
             logger.warning(msg)
         else:

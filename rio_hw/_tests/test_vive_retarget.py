@@ -187,9 +187,7 @@ def test_pose_vector_api_matches_matrix_api():
     np.testing.assert_allclose(matrix_to_pose(pose_to_matrix(pose)), pose, atol=1e-9)
 
     retargeter.engage(tracker_pose([0.0, 1.0, 0.0]), pose[:3], pose_to_matrix(pose)[:3, :3])
-    np.testing.assert_allclose(
-        retargeter.target_pose(tracker_pose([0.0, 1.0, 0.0]), dt=0.02), pose, atol=1e-9
-    )
+    np.testing.assert_allclose(retargeter.target_pose(tracker_pose([0.0, 1.0, 0.0]), dt=0.02), pose, atol=1e-9)
 
 
 def test_long_trajectory_stays_finite():

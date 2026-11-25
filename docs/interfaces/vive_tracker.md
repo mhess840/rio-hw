@@ -28,7 +28,7 @@ Warning! On some computers, doing the sudo apt install steam may remove your ubu
 sudo apt-get -s install steam
 ```
 
-If you see "The following pakcages will be REMOVED:" and see ubuntu-desktop, gdm3, gnome-shell, or any nvidia drivers, DO NOT INSTALL WITH APT. Do the directions below
+If you see "The following packages will be REMOVED:" and see ubuntu-desktop, gdm3, gnome-shell, or any nvidia drivers, DO NOT INSTALL WITH APT. Do the directions below
 
 ```bash
 sudo apt update

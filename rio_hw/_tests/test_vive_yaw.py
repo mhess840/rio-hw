@@ -108,10 +108,7 @@ def test_calibrated_axis_map_sends_hand_motion_the_intended_way():
         return np.linalg.inv(true_map) @ robot_direction
 
     intended = [np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])]
-    measured = [
-        AXIS_MAP_STEAMVR_TO_ROBOT @ dominant_direction(sweep(hand_motion_for(axis)))
-        for axis in intended
-    ]
+    measured = [AXIS_MAP_STEAMVR_TO_ROBOT @ dominant_direction(sweep(hand_motion_for(axis))) for axis in intended]
     solved = yaw_from_motions(measured, intended)
     assert math.degrees(abs(solved - truth)) < 1e-6
 
@@ -150,6 +147,4 @@ def test_uncalibrated_setup_is_visibly_off():
     position, _ = retargeter.target(moved, dt=1.0)
 
     step = position - np.array([0.4, 0.0, 0.3])
-    assert math.degrees(horizontal_angle_between(step, np.array([1.0, 0.0, 0.0]))) == pytest.approx(
-        25.0, abs=0.5
-    )
+    assert math.degrees(horizontal_angle_between(step, np.array([1.0, 0.0, 0.0]))) == pytest.approx(25.0, abs=0.5)

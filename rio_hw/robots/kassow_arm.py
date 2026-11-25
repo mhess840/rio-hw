@@ -293,8 +293,7 @@ class KassowArm(Node):
             RobotController.JOINT_VEL,
         ):
             raise ValueError(
-                "robot_controller must be task_pos_ik, task_pos, joint_pos, or "
-                f"joint_vel; got {robot_controller!r}"
+                f"robot_controller must be task_pos_ik, task_pos, joint_pos, or joint_vel; got {robot_controller!r}"
             )
         self.num_joints = NUM_JOINTS
         self.max_pos_speed = max_pos_speed
@@ -515,11 +514,7 @@ class KassowArm(Node):
         if self.lowpass_alpha is not None:
             logger.info(f"KassowArm: command low-pass alpha={self.lowpass_alpha:.2f}")
         if self.robot_controller == RobotController.TASK_POS_IK:
-            accel = (
-                f", max_joint_accel={self.max_joint_accel:.1f} rad/s²"
-                if self.max_joint_accel is not None
-                else ""
-            )
+            accel = f", max_joint_accel={self.max_joint_accel:.1f} rad/s²" if self.max_joint_accel is not None else ""
             logger.info(
                 f"KassowArm: task_pos_ik → Jacobian VelCmd (ik_kp={self.ik_kp:.1f} 1/s, "
                 f"max_motor_speed={self.max_motor_speed:.2f} rad/s{accel})"
@@ -668,9 +663,7 @@ class KassowArm(Node):
                                     if sr > self.max_rot_speed > 0.0:
                                         twist[3:] *= self.max_rot_speed / sr
                                     qd = self._kin.twist_to_qd(joint_q_now, twist)
-                                    qd = np.clip(qd, -self.max_motor_speed, self.max_motor_speed).astype(
-                                        self.dtype
-                                    )
+                                    qd = np.clip(qd, -self.max_motor_speed, self.max_motor_speed).astype(self.dtype)
                                 if self.lowpass_alpha is not None:
                                     if self._qd_filter is None:
                                         self._qd_filter = LowPassFilter(alpha=self.lowpass_alpha, initial=zeros7)
@@ -730,7 +723,9 @@ class KassowArm(Node):
                                 # Anchoring on the measured position means the first
                                 # command can only advance one step from where the arm
                                 # actually is, whatever the caller asked for.
-                                target = np.clip(target, last_joint_q - self._max_joint_step, last_joint_q + self._max_joint_step)
+                                target = np.clip(
+                                    target, last_joint_q - self._max_joint_step, last_joint_q + self._max_joint_step
+                                )
                                 if self.lowpass_alpha is not None and joint_filter is None:
                                     joint_filter = LowPassFilter(alpha=self.lowpass_alpha, initial=joint_q_now)
                                 if joint_filter is not None:
@@ -762,10 +757,7 @@ class KassowArm(Node):
                                 # trips JTORQUE. Idle zeros stay off until the next teleop
                                 # moveL re-enters Vel from the measured pose.
                                 if state.alarm_code:
-                                    logger.warning(
-                                        "KassowArm: skip discrete moveJ, alarm "
-                                        f"{describe_alarm(state.alarm_code)}"
-                                    )
+                                    logger.warning(f"KassowArm: skip discrete moveJ, alarm {describe_alarm(state.alarm_code)}")
                                     continue
                                 self._vel_mode_active = False
                                 self._qd_filter = None
@@ -781,8 +773,7 @@ class KassowArm(Node):
                                 cmd.bt_val = 0.0
                                 self._bridge.queue_move_j(cmd)
                                 logger.info(
-                                    f"KassowArm: discrete moveJ duration={duration:.2f}s "
-                                    f"q={np.round(target, 3).tolist()}"
+                                    f"KassowArm: discrete moveJ duration={duration:.2f}s q={np.round(target, 3).tolist()}"
                                 )
 
                             else:

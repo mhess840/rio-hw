@@ -36,8 +36,7 @@ def find_devices(vr_system: Any, device_class: int) -> list[int]:
     return [
         index
         for index in range(openvr.k_unMaxTrackedDeviceCount)
-        if vr_system.isTrackedDeviceConnected(index)
-        and vr_system.getTrackedDeviceClass(index) == device_class
+        if vr_system.isTrackedDeviceConnected(index) and vr_system.getTrackedDeviceClass(index) == device_class
     ]
 
 
@@ -124,17 +123,14 @@ class ViveTracker(Node):
     def _connect(self):
         """Initialize OpenVR and resolve which tracker to follow."""
         if openvr is None:
-            raise RuntimeError(
-                "openvr is not installed. Install the vive extra: pip install 'rio_hw[vive]'"
-            )
+            raise RuntimeError("openvr is not installed. Install the vive extra: pip install 'rio_hw[vive]'")
 
         vr_system = openvr.init(openvr.VRApplication_Background)
 
         bases = find_base_stations(vr_system)
         if bases:
             print(
-                "[ViveTracker] Base stations: "
-                + ", ".join(device_serial(vr_system, i) for i in bases),
+                "[ViveTracker] Base stations: " + ", ".join(device_serial(vr_system, i) for i in bases),
                 flush=True,
             )
         else:
@@ -156,17 +152,13 @@ class ViveTracker(Node):
         trackers = find_trackers(vr_system)
         if not trackers:
             openvr.shutdown()
-            raise RuntimeError(
-                "No Vive trackers in OpenVR. Start SteamVR, power the tracker, and pair it."
-            )
+            raise RuntimeError("No Vive trackers in OpenVR. Start SteamVR, power the tracker, and pair it.")
 
         available = [device_serial(vr_system, index) for index in trackers]
         print(f"[ViveTracker] Trackers: {', '.join(available)}", flush=True)
         if self.serial and self.serial not in available:
             openvr.shutdown()
-            raise RuntimeError(
-                f"Tracker {self.serial!r} not found. Available: {', '.join(available)}"
-            )
+            raise RuntimeError(f"Tracker {self.serial!r} not found. Available: {', '.join(available)}")
 
         label = self.serial or available[0]
         print(f"[ViveTracker] Following {label}", flush=True)
@@ -195,9 +187,7 @@ class ViveTracker(Node):
                     if not pose.bPoseIsValid:
                         break
                     matrix = pose_matrix(pose.mDeviceToAbsoluteTracking)
-                    tracker_pose = np.concatenate(
-                        [matrix[:3, 3], matrix_to_rotvec(matrix[:3, :3])]
-                    ).astype(self.dtype)
+                    tracker_pose = np.concatenate([matrix[:3, 3], matrix_to_rotvec(matrix[:3, :3])]).astype(self.dtype)
                     pose_valid = 1.0
                     break
 
