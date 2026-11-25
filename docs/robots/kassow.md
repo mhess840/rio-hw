@@ -116,7 +116,15 @@ STATION=KassowStation uv run -m examples.teleop_eef
 
 Default path: Spacemouse EEF deltas → Pinocchio IK (`rio_hw/assets/kassow/kr2_robot_S00V0000M1018.urdf`)
 → `VelCmd` / `directJControl`. You should see `moveL 0.0 Hz` in diagnostics while
-the arm still tracks smoothly. Override speeds as needed:
+the arm still tracks smoothly.
+
+The packaged URDF carries the joint origins of our arm's factory kinematic calibration
+(RUID 3726823544), so its FK matches the controller's joint frames. For another arm, fetch
+its calibrated URDF with the KORD calibration transfer (`asCalibrationDataTransfer()`,
+target set by `KORD.ini`) and copy the joint and inertial origins over; the nominal URDF
+is off by up to about 7 mm at the flange.
+
+Override speeds as needed:
 
 ```bash
 STATION=KassowStation uv run -m examples.teleop_eef \
